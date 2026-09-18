@@ -98,8 +98,10 @@ SNR/RSSI from the following RxMeta. This is the core of the link test.
 All topics live under `meshcore/snr`. All payloads are JSON. QoS 1, not
 retained. Timestamps are UTC ISO-8601 (`...Z`).
 
-Broker: LAN-only, plain TCP (no TLS). Default address in
-`config/sweep.toml` is `mqtt.local.cisien.com:1883` (see `docs/DEPLOY.md`).
+Broker: any MQTT broker all participants can reach. Default address in
+`config/sweep.toml` is `127.0.0.1:1883` (plain TCP, no TLS). For a
+TLS + credentials broker, set `mqtt_tls = true` and fill in `mqtt_user` /
+`mqtt_pass` (see `docs/DEPLOY.md`).
 
 ### 2.1 Topic tree
 

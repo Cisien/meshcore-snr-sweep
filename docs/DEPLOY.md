@@ -1,17 +1,10 @@
 # Deployment Guide
 
-Everything in this document targets the homelab Kubernetes cluster (Talos
-control plane, `nas-nfs` / `proxmox-ceph-rbd` storage classes, `registry.cisien.com`
-zot registry). The goal: a LAN-reachable MQTT broker + a recorder that persists
-all survey data, plus flashed Station G3 radios.
-
-## 0. Prerequisites
-
-* `kubectl` and `talosctl` authenticated to the cluster.
-* A zot registry reachable at `registry.cisien.com` (already in this cluster).
-* Two Station G3 radios, each attached to a Raspberry Pi over USB.
-* `podman` on the host you build the recorder image from (any node that can
-  reach the registry).
+What you need to get the survey running: flashed radios, **one MQTT broker**,
+and (optionally) a **recorder process** that persists the data. The recorder
+is a plain Python process — no cluster required. The only thing that *might*
+live in Kubernetes is the broker, and even that only if you don't already
+have an MQTT broker somewhere.
 
 ## 1. Flash the radios (KISS modem firmware)
 
@@ -46,112 +39,95 @@ with KissClient(p) as c:
 
 `ping=True` and a version number confirm the KISS modem is up.
 
-## 2. Deploy the MQTT broker
+## 2. Get an MQTT broker running
 
-```bash
-kubectl apply -f kubernetes/mqtt-broker/manifest.yaml
-kubectl -n mqtt rollout status deploy/mosquitto
-kubectl -n mqtt get pods -l app.kubernetes.io/name=mosquitto
-```
+You need exactly one broker that all workers, the coordinator, and the
+recorder can reach. Any of these works:
 
-Verify from a node (or the Pi):
+* **mosquitto on any machine** (a Pi, a server, this box):
+  ```bash
+  sudo apt install mosquitto        # Debian/Ubuntu
+  # default listener: 1883, unauthenticated
+  ```
+* **mosquitto with TLS + username/password** for cross-network use — see
+  `kubernetes/mqtt-broker/manifest.yaml` for a complete example of a TLS
+  listener with a password file and an init container that handles
+  mosquitto's `openat()` quirk with K8s Secret symlinks. You can lift that
+  ConfigMap/Secret setup into a plain host-level `mosquitto.conf` too.
+* **A broker you already have** — just point the configs at it.
 
-```bash
-# in-cluster service name
-kubectl run --rm -it --image=eclipse-mosquitto:2 mosq-test -- sh \
-  -c "mosquitto_sub -h mosquitto.mqtt.svc.cluster.local -t '#' -C 1 -v & sleep 1; \
-      mosquitto_pub -h mosquitto.mqtt.svc.cluster.local -t test/hello -m hi"
-```
+Note on TLS + credentials: if the broker requires TLS and/or a
+username/password, set `mqtt_tls = true` and `mqtt_user` / `mqtt_pass` in
+the config file you pass to each process (see `config/public.example.toml`
+for the shape). All processes that participate in the same test must agree
+on the same broker address and the same credentials.
 
-You should see `test/hello hi`.
+## 3. Run the recorder (optional, recommended)
 
-### Exposing the broker to the LAN (for the PIs)
-
-The PIs need to reach the broker by a plain LAN address (private IP, no TLS —
-per the LAN-only convention). Three options, pick one:
-
-1. **Cilium L2 (recommended if active).** Uncomment the `cilium.io/l2-priority`
-   + `externalIPs` annotations on the `mosquitto-lan` Service and set a free LAN
-   address. AdGuard already serves `*.local.cisien.com`; point
-   `mosquitto.local.cisien.com` at that address (or use the bare IP).
-2. **NodePort.** Use `http://<any-node-ip>:30883`. No DNS needed; just less
-   stable than L2.
-3. **Cluster-internal only.** Keep `mqtt_host = mosquitto.mqtt.svc.cluster.local`
-   and run the Pi scripts *inside* the cluster (not recommended for a Pi on the
-   bench).
-
-Set `mqtt_host` in `config/sweep.toml` on each Pi to whatever you chose.
-
-## 3. Build and deploy the recorder
-
-Build the recorder image from this repo and push it to the cluster registry:
+The recorder is a normal Python process. Run it on any machine that can
+reach the broker and has a writable path for the SQLite DB:
 
 ```bash
 cd meshcore-snr-sweep
-podman login registry.cisien.com        # if not already logged in
-podman build -f scripts/Dockerfile \
-  -t registry.cisien.com/meshcore/snr-recorder:latest .
-podman push registry.cisien.com/meshcore/snr-recorder:latest
+. .venv/bin/activate
+
+# plain-TCP broker:
+snr-recorder --host 192.168.1.1 --port 1883 \
+    --db ./data/snr.sqlite3 --bind 0.0.0.0:8080
+
+# TLS + credentials broker:
+snr-recorder --host mqtt.example.com --port 8883 \
+    --username meshcore --password <pass> --tls \
+    --db ./data/snr.sqlite3 --bind 0.0.0.0:8080
 ```
 
-Deploy:
+You should see:
 
-```bash
-kubectl apply -f kubernetes/snr-recorder/manifest.yaml
-kubectl -n mqtt rollout status deploy/snr-recorder
-kubectl -n mqtt get pods -l app.kubernetes.io/name=snr-recorder
+```
+recorder connected to <host>:<port>, subscribed meshcore/snr/#
+HTTP API on 0.0.0.0:8080 (endpoints: /health /noise /noise/summary /link
+/link/summary /status /export?kind=noise|link / )
 ```
 
-Verify the recorder connected to the broker:
-
-```bash
-kubectl -n mqtt logs -l app.kubernetes.io/name=snr-recorder \
-  | grep -i "subscribed\|connected\|HTTP API"
-```
-
-You should see `recorder connected to ... subscribed meshcore/snr/#` and
-`HTTP API on 0.0.0.0:8080`.
-
-### Pulling data
-
-The recorder's HTTP API is in-cluster at `http://snr-recorder.mqtt.svc:8080`
-and on the LAN via the `snr-recorder-lan` NodePort (default `30884`):
+All survey data lands in the SQLite file you gave as `--db`. The HTTP API
+lets you read it back without touching the radios:
 
 ```bash
 # counts
-curl http://<node-ip>:30884/
+curl http://<recorder-host>:8080/
 # noise summary (ranked by cleanest floor)
-curl http://<node-ip>:30884/noise/summary?node=tower
+curl http://<recorder-host>:8080/noise/summary?node=tower
 # per-frequency link delivery
-curl http://<node-ip>:30884/link/summary?node=field
+curl http://<recorder-host>:8080/link/summary?node=field
 # raw CSV export
-curl -OJ 'http://<node-ip>:30884/export?kind=noise&node=tower'
+curl -OJ 'http://<recorder-host>:8080/export?kind=noise&node=tower'
 ```
 
 Endpoints: `/health`, `/` (counts), `/noise`, `/noise/summary`, `/link`,
 `/link/summary`, `/status`, `/export?kind=noise|link`. Details in `docs/RUN.md`.
 
+If you want to containerize the recorder instead of running it directly,
+`scripts/Dockerfile` builds an image that runs `snr-recorder` with the same
+`MQTT_HOST` / `MQTT_PORT` / `SNR_DB` / `SNR_BIND` env vars.
+
 ## 4. Smoke test (end to end, no radios)
 
 Confirm the recorder is actually persisting MQTT traffic by publishing a test
-message from any node that can reach the broker:
+message from any machine that can reach the broker:
 
 ```bash
-kubectl run --rm -it --image=eclipse-mosquitto:2 pub-test -- sh -c \
- 'mosquitto_pub -h mosquitto.mqtt.svc.cluster.local \
+mosquitto_pub -h <broker> -p 1883 \
    -t meshcore/snr/alpha/noise/sample \
-   -m "{\"node\":\"alpha\",\"freq_hz\":902000000,\"channel_index\":0,
-        \"sample_index\":0,\"noise_floor_dbm\":-112,\"rssi_dbm\":-113,\"ts\":\"test\"}"'
+   -m '{"node":"alpha","freq_hz":902300000,"channel_index":0,
+        "sample_index":0,"noise_floor_dbm":-112,"rssi_dbm":-113,"ts":"test"}'
 # then
-curl http://<node-ip>:30884/noise?node=alpha | head
+curl http://<recorder-host>:8080/noise?node=alpha | head
 ```
 
 The test reading should appear.
 
 ## 5. Teardown
 
-```bash
-kubectl delete -f kubernetes/snr-recorder/manifest.yaml
-kubectl delete -f kubernetes/mqtt-broker/manifest.yaml
-podman rmi registry.cisien.com/meshcore/snr-recorder:latest
-```
+Stop the recorder process (`Ctrl-C`), stop the broker if you stood one up
+for the test, and keep the SQLite DB — that is the durable record of the
+run.

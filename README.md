@@ -57,7 +57,6 @@ broker is not the coordinator's broker, the commands never arrive.
 config/
   sweep.toml             survey parameters (band, timing, sizes, node, broker)
   public.example.toml    public-broker TEMPLATE: TLS + username/password (committed)
-  local-lan.toml         LAN-broker example (plain TCP, private IP)
   public.toml            <- YOUR public-broker config (gitignored; copy the example)
 py/snr_sweep/
   kiss_client.py         low-level KISS modem client (framing + events)
@@ -72,9 +71,8 @@ py/snr_sweep/
   chart.py               render a link run as an HTML chart (python -m snr_sweep.chart)
 py/tests/                unit + loopback tests (no hardware / broker needed)
 kubernetes/
-  mqtt-broker/manifest.yaml   mosquitto + namespace + PVC + LAN Service
-  snr-recorder/manifest.yaml  recorder Deployment + PVC + HTTP + LAN Service
-scripts/Dockerfile           recorder image
+  mqtt-broker/manifest.yaml   mosquitto K8s deployment (optional; use if you don't have a broker)
+scripts/Dockerfile           optional container image for the recorder
 docs/
   PROTOCOL.md                KISS + MQTT wire reference (authoritative)
   DEPLOY.md                  broker + recorder + flash deployment
@@ -130,9 +128,9 @@ set the node role or the radio — those come from the CLI flags (`--node`,
 
 | Config | Broker | When to use |
 |--------|--------|-------------|
-| `config/public.toml` | `mqtt.cisien.com:8883`, **TLS + username/password** | Reaching the broker across networks / over the internet. **Not committed** — copy `config/public.example.toml` → `public.toml` and fill in the password |
-| `config/local-lan.toml` | `192.168.1.42:1883`, plain TCP | All on the LAN, no TLS |
-| `config/sweep.toml` | your cluster's LAN split-DNS name | Default template; edit to your broker |
+| `config/sweep.toml` | `127.0.0.1:1883`, plain TCP | Default. Edit `mqtt_host` to point at your broker. The only config that needs to exist |
+| `config/public.toml` | TLS + username/password | Reaching a TLS broker across networks. **Not committed** — copy `config/public.example.toml` → `public.toml` and fill in the password |
+
 
 To point a worker at a broker that is **not** in any config file, use the
 overrides instead of editing a file:
@@ -318,7 +316,7 @@ Full bring-up detail (SPI pin map, FEM, display, flash tooling) is in
 
 * **No custom firmware** — only the stock KISS modem, versioned in the MeshCore
   repo, so the air interface is stable and documented (`docs/PROTOCOL.md`).
-* **All data durable in the cluster** — the recorder's SQLite is the source of
+* **All data durable on disk** — the recorder's SQLite file is the source of
   truth; pull it over the HTTP API without touching the radios.
 * **Config-driven** — the channel list and sampling derive entirely from the
   config; keep a copy of the one you used.

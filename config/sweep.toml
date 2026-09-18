@@ -54,12 +54,15 @@ link_tx_wait_s = 2
 node_id = "alpha"
 
 # ---- MQTT broker ------------------------------------------------------------
-# LAN-only broker (private IP, plain TCP). This default uses the cluster's
-# internal *.local.cisien.com split-DNS (AdGuard -> 172.16.0.239). Point it at
-# whichever address your PIs can reach; see docs/DEPLOY.md for the broker
-# deployment and how to expose it to the LAN.
-mqtt_host = "mqtt.local.cisien.com"
+# Point this at the one broker every process in the test uses. Plain TCP
+# (local / LAN) by default. For a TLS + username/password broker, set
+# mqtt_tls = true and fill in mqtt_user / mqtt_pass (see
+# config/public.example.toml).
+mqtt_host = "127.0.0.1"
 mqtt_port = 1883
+# mqtt_tls  = false
+# mqtt_user = "meshcore"
+# mqtt_pass = "CHANGE_ME"
 
 # ---- serial -----------------------------------------------------------------
 # serial_port = "/dev/ttyACM0"   # leave unset to auto-detect (recommended)

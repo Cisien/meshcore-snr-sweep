@@ -1,12 +1,18 @@
-# Survey data recorder image.
+# Survey data recorder image (optional containerization).
 #
-# Build and push to the cluster's zot registry (see docs/DEPLOY.md):
+# The recorder is a plain Python process (see docs/DEPLOY.md §3). This image
+# is just a convenience if you want to run it in a container instead.
 #
-#   podman build -f scripts/Dockerfile -t registry.cisien.com/meshcore/snr-recorder:latest .
-#   podman push registry.cisien.com/meshcore/snr-recorder:latest
+#   podman build -f scripts/Dockerfile -t snr-recorder:latest .
+#   podman run -it --rm \
+#       -e MQTT_HOST=192.168.1.1 -e MQTT_PORT=1883 \
+#       -v $PWD/data:/data \
+#       -p 8080:8080 snr-recorder:latest
 #
-# The image runs snr-recorder: it connects to the MQTT broker (MQTT_HOST/MQTT_PORT),
-# persists meshcore/snr/# to a SQLite DB at SNR_DB, and serves the HTTP API on SNR_BIND.
+# The container runs snr-recorder: it connects to the MQTT broker
+# (MQTT_HOST/MQTT_PORT, plus MQTT_USER/MQTT_PASS/MQTT_TLS=1 for TLS+auth),
+# persists meshcore/snr/# to a SQLite DB at SNR_DB, and serves the HTTP API
+# on SNR_BIND.
 
 FROM python:3.12-slim
 

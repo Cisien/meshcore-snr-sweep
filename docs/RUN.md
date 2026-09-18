@@ -1,8 +1,9 @@
 # Run Guide
 
 How to actually run the survey on the two PIs, read the results, and reproduce
-anything. Assumes the broker + recorder are deployed (`docs/DEPLOY.md`) and the
-radios are flashed to the KISS modem.
+anything. Assumes you have flashed G3s and an MQTT broker running (see
+`docs/DEPLOY.md`). A recorder process is recommended but not required —
+workers write local CSV/JSON regardless.
 
 ## 1. One-time Pi setup
 
@@ -71,7 +72,7 @@ band from two locations; the recorder separates them by `node`).
 From the recorder API (or the local JSON):
 
 ```bash
-curl 'http://<recorder-lan>/noise/summary?node=tower'
+curl 'http://<recorder-host>:8080/noise/summary?node=tower'
 ```
 
 `cleanest_top5` lists the centers with the lowest `fmin` (minimum floor across
@@ -105,7 +106,8 @@ subscribed. Leave both running.
 
 ### 3b. Run the coordinator
 
-The coordinator is pure MQTT (no radio) — run it from either Pi or the cluster.
+The coordinator is pure MQTT (no radio) — run it from any machine that can
+reach the broker.
 It drives every (center, size, trial, direction) combination. `--node-a` /
 `--node-b` must match the `--node` each worker was started with.
 
@@ -130,8 +132,8 @@ the end (per-center delivered/total and median SNR). Local CSV + JSON land in
 ### 3c. Reading the link results
 
 ```bash
-curl 'http://<recorder-lan>/link/summary?node=field'
-curl 'http://<recorder-lan>/link?node=field&freq_hz=902300000&packet_size=101'
+curl 'http://<recorder-host>:8080/link/summary?node=field'
+curl 'http://<recorder-host>:8080/link?node=field&freq_hz=902300000&packet_size=101'
 ```
 
 Key metrics per (center, direction, size): delivery rate (`ok/n`) and median
@@ -150,7 +152,7 @@ python -m snr_sweep.chart --input data/link_test-tower-field-...json
 
 ## 4. Reproducing results
 
-* All raw data is durable in the recorder's SQLite DB (PVC). Anyone can pull it
+* All raw data is durable in the recorder's SQLite DB file. Anyone can pull it
   from the HTTP API without touching the radios.
 * Local `data/*.csv` / `data/*.json` from each Pi are byte-for-byte reproducible
   given the same config and the same radios.
@@ -166,4 +168,4 @@ python -m snr_sweep.chart --input data/link_test-tower-field-...json
 | Floor pinned at −120 dBm | AGC stuck / no antenna | Check antenna + LNA; reset AGC (firmware does this every 30 s) |
 | No link results | rx window open too late, or radios out of range | Increase `link_rx_lead_s`; reduce distance/power |
 | `TxBusy` | A prior TX didn't finish | Bigger `link_tx_wait_s` |
-| Recorder not storing | Not connected to broker | Check `logs -l app.kubernetes.io/name=snr-recorder` |
+| Recorder not storing | Not connected to broker | Check recorder process logs / `journalctl` |
