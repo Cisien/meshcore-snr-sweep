@@ -1,0 +1,23 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# Survey output
+data/
+
+# Local secrets / machine-specific overrides
+config/sweep.local.toml
+*.local.toml
+# The real public-broker config (holds broker credentials). Committed template:
+# config/public.example.toml. Copy it to config/public.toml and fill in creds.
+config/public.toml
+
+# IDE
+.vscode/
+.idea/
+*.swp

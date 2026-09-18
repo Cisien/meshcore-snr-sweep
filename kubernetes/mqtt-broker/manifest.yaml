@@ -1,0 +1,129 @@
+# MQTT broker for the MeshCore 500 kHz survey.
+#
+# Mosquitto runs with persistence on a PVC (retained messages survive restarts)
+# and is exposed LAN-only. Two exposure options are documented below; uncomment
+# the one that matches your cluster.
+#
+# Apply:  kubectl apply -f kubernetes/mqtt-broker/
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mqtt
+  labels:
+    app.kubernetes.io/part-of: meshcore-snr
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mosquitto-data
+  namespace: mqtt
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: nas-nfs
+  resources:
+    requests:
+      storage: 1Gi
+---
+# No-auth LAN broker. If you need credentials, add a mosquitto password file
+# via a Secret and set listener 1883 to require auth; see docs/DEPLOY.md.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mosquitto-config
+  namespace: mqtt
+data:
+  mosquitto.conf: |
+    persistence true
+    persistence_location /mosquitto/data/
+    paho true
+    log_dest file /mosquitto/log/mosquitto.log
+    log_type error
+    log_type warning
+    log_type notice
+    # Bind all interfaces; the Service controls who can reach it.
+    listener 1883
+    allow_anonymous true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mosquitto
+  namespace: mqtt
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mosquitto
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mosquitto
+    spec:
+      containers:
+        - name: mosquitto
+          image: eclipse-mosquitto:2
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: mqtt
+              containerPort: 1883
+          env:
+            - name: MOSQ_CONFIG
+              value: /config/mosquitto.conf
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: data
+              mountPath: /mosquitto/data
+            - name: log
+              mountPath: /mosquitto/log
+      volumes:
+        - name: config
+          configMap:
+            name: mosquitto-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: mosquitto-data
+        - name: log
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mosquitto
+  namespace: mqtt
+spec:
+  selector:
+    app.kubernetes.io/name: mosquitto
+  ports:
+    - name: mqtt
+      port: 1883
+      targetPort: mqtt
+---
+# Option A (used by the Pi scripts): expose the broker on a stable LAN IP via
+# the cluster's *.local.cisien.com split-DNS. Set mosquitto.local.cisien.com
+# to point at this NodePort on every control-plane node (or add a MetalLB /
+# Cilium L2 service). With Cilium L2 (see kubernetes/network/
+# l2-announcement-policy.yaml), an externalIPs annotation is enough:
+apiVersion: v1
+kind: Service
+metadata:
+  name: mosquitto-lan
+  namespace: mqtt
+  annotations:
+    # Uncomment when Cilium L2 is active and choose a free LAN address:
+    # cilium.io/l2-priority: "100"
+    # externalIPs: "172.16.0.239"
+  labels:
+    app.kubernetes.io/name: mosquitto
+spec:
+  type: NodePort
+  externalTrafficPolicy: Local
+  selector:
+    app.kubernetes.io/name: mosquitto
+  ports:
+    - name: mqtt
+      port: 1883
+      targetPort: mqtt
+      # Fixed so Pi scripts can use <node>:<nodePort> if they can't resolve DNS:
+      nodePort: 30883

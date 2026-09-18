@@ -1,0 +1,30 @@
+# Public-broker config TEMPLATE.
+#
+# Copy this to config/public.toml and fill in the real broker credentials.
+# config/public.toml is gitignored so real credentials are never committed.
+#
+#   cp config/public.example.toml config/public.toml
+#   # edit mqtt_pass (and mqtt_user / host / port if your broker differs)
+#
+# Reaches the homelab cluster mosquitto over TLS + username/password, so it
+# works across networks / over the internet. Run a link test with:
+#   python -m snr_sweep.link_worker --config config/public.toml
+#
+node_id = "tower"
+mqtt_host = "mqtt.cisien.com"
+mqtt_port = 8883
+mqtt_user = "meshcore"
+mqtt_pass = "CHANGE_ME"
+mqtt_tls = true
+sf = 7
+cr = 5
+bandwidth_khz = 500
+tx_power_dbm = 14
+band_start_mhz = 902.3
+band_end_mhz = 915.0
+step_khz = 100
+link_settle_s = 0.3
+link_rx_lead_s = 0.7
+link_rx_window_s = 3.0
+link_tx_wait_s = 0.5
+log_dir = "./data"

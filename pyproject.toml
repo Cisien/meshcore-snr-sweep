@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "snr-sweep"
+version = "0.1.0"
+description = "MeshCore 500 kHz noise-floor and link survey tools (KISS modem + MQTT)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Cisien" }]
+dependencies = [
+    "pyserial>=3.5",
+    "paho-mqtt>=1.6.1,<2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+snr-noise-sweep = "snr_sweep.noise_sweep:main"
+snr-link-worker = "snr_sweep.link_worker:main"
+snr-link-coordinator = "snr_sweep.link_coordinator:main"
+snr-recorder = "snr_sweep.recorder:main"
+
+[tool.setuptools.packages.find]
+where = ["py"]
+
+[tool.pytest.ini_options]
+testpaths = ["py/tests"]
+pythonpath = ["py"]

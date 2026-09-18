@@ -1,0 +1,70 @@
+# MeshCore 500 kHz survey -- default sweep parameters.
+#
+# These are the values for the survey the user requested:
+#   * band 902.0 -> 915.0 MHz
+#   * 100 kHz center steps (=> 131 centers)
+#   * 500 kHz LoRa bandwidth
+#   * 10 noise readings per center, 60 s apart (=> 10 minutes per channel)
+#   * link test packet sizes ~1..255 in ~50-byte steps, 3 trials each
+#
+# Override any of these on the command line, or copy this file and edit it.
+# See docs/RUN.md for the full run guide and docs/PROTOCOL.md for the
+# KISS/MQTT wire formats.
+
+# ---- band -------------------------------------------------------------------
+band_start_mhz = 902.3
+band_end_mhz = 915.0
+step_khz = 100
+bandwidth_khz = 500
+
+# ---- LoRa radio -------------------------------------------------------------
+# SF and CR are used for both the noise sweep (RX-only) and the link test.
+# SF7 / CR 4/5 (cr=5) is the survey's target LoRa config at 500 kHz BW.
+sf = 7
+cr = 5          # 5=4/5, 6=4/6, 7=4/7, 8=4/8
+tx_power_dbm = 7   # G3 SX1262 input power into the PA (default in platformio.ini)
+
+# ---- baseline (captured before the main sweep) --------------------------------
+# A reference noise-floor reading at MeshCore's default deployment settings
+# (910.525 MHz, 62.5 kHz, SF7, CR 4/5) taken before the 500 kHz sweep begins.
+# Uses the same burst-of-N sampling as the main sweep.
+baseline_enabled = true
+baseline_freq_mhz = 910.525
+baseline_bandwidth_hz = 62500   # 62.5 kHz (standard SX1262 BW)
+baseline_sf = 7
+baseline_cr = 5
+
+# ---- noise sampling (primary objective) -------------------------------------
+# `sample_count` noise-floor / RSSI samples are taken per channel, spread evenly
+# across `channel_duration_s` (default: 10 samples over 10 s = 1 s apart).
+sample_count = 10
+channel_duration_s = 10     # seconds to sample each channel (~15 s/channel incl. settle)
+settle_s = 5                # AGC settle after a frequency change, before sampling
+
+# ---- link test (secondary objective) ----------------------------------------
+# ~1..255 bytes in ~50-byte steps (last step is smaller to land on 255).
+packet_sizes = [1, 51, 101, 151, 201, 255]
+link_trials = 3
+link_settle_s = 5
+link_tx_wait_s = 2
+
+# ---- topology / identity ----------------------------------------------------
+# Node identity on the Pi running the sweep. Use a different value per site
+# (alpha/beta) so the recorder can tell the two locations apart.
+node_id = "alpha"
+
+# ---- MQTT broker ------------------------------------------------------------
+# LAN-only broker (private IP, plain TCP). This default uses the cluster's
+# internal *.local.cisien.com split-DNS (AdGuard -> 172.16.0.239). Point it at
+# whichever address your PIs can reach; see docs/DEPLOY.md for the broker
+# deployment and how to expose it to the LAN.
+mqtt_host = "mqtt.local.cisien.com"
+mqtt_port = 1883
+
+# ---- serial -----------------------------------------------------------------
+# serial_port = "/dev/ttyACM0"   # leave unset to auto-detect (recommended)
+serial_baud = 115200
+
+# ---- output -----------------------------------------------------------------
+log_dir = "./data"
+# dry_run = false                  # set true to just print the plan
