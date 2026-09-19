@@ -13,9 +13,11 @@ data/
 # Local secrets / machine-specific overrides
 config/sweep.local.toml
 *.local.toml
-# The real public-broker config (holds broker credentials). Committed template:
-# config/public.example.toml. Copy it to config/public.toml and fill in creds.
+# Real public-broker configs (credentials). Committed templates are
+# config/*.example.toml only.
 config/public.toml
+config/public-sf*.toml
+!config/*.example.toml
 
 # IDE
 .vscode/
