@@ -63,13 +63,14 @@ def test_full_run_synthesizes_missing_results():
 
 def test_collect_burst_pads_to_known_count():
     c = _coordinator()
-    c._wait_status = lambda *a, **k: {"state": "burst_rx_done", "count": 1}
-    c._record_result({"node": "beta", "freq_hz": 902300000, "packet_size": 128,
-                      "trial": 0, "rx_ok": True, "snr_db": 9.0, "rssi_dbm": -90.0,
-                      "seq": 7})
-    got = c._collect_burst(7, "beta", 3, 902300000, 128, timeout=0.2)
+    c._wait_status = lambda *a, **k: {
+        "state": "burst_rx_done", "count": 1,
+        "packets": [{"snr_db": 9.0, "rssi_dbm": -90.0}],
+    }
+    got = c._collect_burst(7, "beta", 3, 902300000, 128, timeout=0.2, window_s=0.0)
     assert len(got) == 3
     assert got[0].rx_ok is True
+    assert got[0].snr_db == 9.0
     assert got[1].rx_ok is False
     assert got[2].rx_ok is False
 

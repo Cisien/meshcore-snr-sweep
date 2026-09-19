@@ -45,10 +45,10 @@ settle_s = 5                # AGC settle after a frequency change, before sampli
 # 1 / 128 / 255 byte packets. Each (channel, size, direction) is one burst of
 # `link_burst_count` packets (known delivery-rate denominator).
 packet_sizes = [1, 128, 255]
-link_burst_count = 10
-link_settle_s = 0.3
-link_rx_lead_s = 0.3
-link_rx_window_s = 2.2
+link_burst_count = 20
+link_settle_s = 0.8
+link_rx_lead_s = 0.0
+link_rx_window_s = 4.0
 link_tx_wait_s = 0.5
 
 # ---- topology / identity ----------------------------------------------------

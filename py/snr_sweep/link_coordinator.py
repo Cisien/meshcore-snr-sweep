@@ -18,7 +18,7 @@ Usage::
 
     python -m snr_sweep.link_coordinator --config config/public.toml
     python -m snr_sweep.link_coordinator --node-a tower --node-b field \\
-        --freq-only 902.3 --sizes 1,128,255 --burst-count 10
+        --freq-only 902.3 --sizes 1,128,255 --burst-count 20
 """
 
 from __future__ import annotations
@@ -123,7 +123,7 @@ class Coordinator:
             self._record_result(obj)
         elif topic.endswith("/status"):
             state = obj.get("state")
-            if state in ("burst_rx_done", "burst_tx_done"):
+            if state in ("burst_rx_ready", "burst_rx_done", "burst_tx_done"):
                 with self._cond:
                     self._status_box.append(obj)
                     self._cond.notify_all()
@@ -171,8 +171,12 @@ class Coordinator:
         with self._cond:
             while True:
                 for i, s in enumerate(self._status_box):
-                    if s.get("seq") == expected_seq and s.get("node") == node \
-                            and s.get("state") == state:
+                    seq_raw = s.get("seq")
+                    try:
+                        seq_ok = seq_raw is not None and int(seq_raw) == int(expected_seq)
+                    except (TypeError, ValueError):
+                        seq_ok = False
+                    if seq_ok and s.get("node") == node and s.get("state") == state:
                         del self._status_box[i]
                         return s
                 remaining = end - time.monotonic()
@@ -193,10 +197,42 @@ class Coordinator:
         return captured
 
     def _collect_burst(self, seq: int, rx_node: str, count: int,
-                       freq_hz: int, size: int, timeout: float) -> List[LinkResult]:
-        """Wait for burst_rx_done, drain captured packets, pad misses to ``count``."""
-        self._wait_status(seq, rx_node, "burst_rx_done", timeout)
-        captured = self._drain_results(seq, rx_node)
+                       freq_hz: int, size: int, timeout: float,
+                       window_s: float = 5.0) -> List[LinkResult]:
+        """Wait for burst_rx_done. Ignore empty dones until the RX window elapses.
+
+        A stale or early empty ``burst_rx_done`` (MQTT retain / reorder) was
+        making the coordinator record 0/10 while the radio was still capturing.
+        """
+        start = time.monotonic()
+        end = start + timeout
+        min_empty_s = start + max(1.0, 0.8 * window_s)
+        captured: List[LinkResult] = []
+        while time.monotonic() < end:
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                break
+            done = self._wait_status(seq, rx_node, "burst_rx_done", remaining)
+            if done is None:
+                break
+            packets = done.get("packets")
+            if not isinstance(packets, list):
+                captured = self._drain_results(seq, rx_node)
+                if captured or time.monotonic() >= min_empty_s:
+                    break
+                continue
+            if len(packets) == 0 and time.monotonic() < min_empty_s:
+                log.info("ignoring empty burst_rx_done seq=%s (RX window still open)", seq)
+                continue
+            for p in packets:
+                if not isinstance(p, dict):
+                    continue
+                captured.append(LinkResult(
+                    node_rx=rx_node, rx_ok=True, seq=seq,
+                    freq_hz=freq_hz, packet_size=size, trial=0,
+                    snr_db=p.get("snr_db"), rssi_dbm=p.get("rssi_dbm"),
+                    ts=now_ts()))
+            break
         out = captured[:count]
         while len(out) < count:
             out.append(LinkResult(
@@ -239,14 +275,27 @@ class Coordinator:
                         f"{TOPIC_PREFIX}/coordinator/{rx_node}/cmd",
                         burst_rx_command(freq_hz=ch.center_hz, size=size,
                                          count=count, window_s=window_s, seq=seq))
-                    time.sleep(self.cfg.link_rx_lead_s)
-                    self._send(
-                        f"{TOPIC_PREFIX}/coordinator/{tx_node}/cmd",
-                        burst_tx_command(freq_hz=ch.center_hz, size=size,
-                                         count=count, seq=seq))
-                    got = self._collect_burst(
-                        seq, rx_node, count, ch.center_hz, size,
-                        timeout=window_s + 4.0)
+                    ready = self._wait_status(seq, rx_node, "burst_rx_ready",
+                                              timeout=15.0)
+                    if ready is None:
+                        log.warning("  no burst_rx_ready from %s seq=%d — skip TX",
+                                    rx_node, seq)
+                        got = []
+                    else:
+                        self._send(
+                            f"{TOPIC_PREFIX}/coordinator/{tx_node}/cmd",
+                            burst_tx_command(freq_hz=ch.center_hz, size=size,
+                                             count=count, seq=seq))
+                        got = self._collect_burst(
+                            seq, rx_node, count, ch.center_hz, size,
+                            timeout=window_s + 8.0, window_s=window_s)
+                    if not got:
+                        got = [
+                            LinkResult(node_rx=rx_node, rx_ok=False, seq=seq,
+                                       freq_hz=ch.center_hz, packet_size=size,
+                                       trial=i, ts=now_ts())
+                            for i in range(1, count + 1)
+                        ]
                     ok = sum(1 for r in got if r.rx_ok)
                     for r in got:
                         r.freq_mhz = ch.center_mhz

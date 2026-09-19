@@ -68,6 +68,7 @@ class LinkWorker:
         self.mqttc = mqttc
         self._cmd_queue: "queue.Queue[dict]" = queue.Queue()
         self._dispatch_thread: Optional[threading.Thread] = None
+        self._tuned_hz: Optional[int] = None
 
     def connect(self) -> None:
         port = find_port(self.cfg.serial_port, required=True)
@@ -83,6 +84,10 @@ class LinkWorker:
         except KissError:
             pass
         self.client.set_tx_power(self.cfg.tx_power_dbm)
+        # Burst timing: firmware defaults TXDELAY=500ms and p-persistent CSMA
+        # (~1s/packet). Full duplex skips CSMA; TXDELAY=10ms is enough keyup.
+        self.client.set_fullduplex(True)
+        self.client.set_txdelay(1)
 
         self.mqttc = make_client(
             client_id=f"link-{self.cfg.node_id}",
@@ -113,6 +118,8 @@ class LinkWorker:
             subs = subscribe_for_node(self.cfg.node_id)
             for t in subs:
                 self.mqttc.subscribe(t, qos=1)
+            # Clear any retained status from a previous run (seq collisions).
+            self.mqttc.publish(status_topic(self.cfg.node_id), "", qos=1, retain=True)
             self._publish_status("ready")
             log.info("subscribed to %s", subs)
 
@@ -156,10 +163,31 @@ class LinkWorker:
 
     # ----------------------------------------------------------------- actions
     def _tune(self, freq_hz: int) -> None:
+        """SetRadio if the center changed, then settle. No sleep if already tuned."""
         assert self.client is not None
-        if not self.client.set_radio(freq_hz, self.cfg.bandwidth_hz, self.cfg.sf, self.cfg.cr):
-            raise KissError(f"SetRadio rejected at {freq_hz} Hz")
-        time.sleep(self.cfg.link_settle_s)
+        if self._tuned_hz != freq_hz:
+            try:
+                self.client.wait_tx_done(timeout=0.2)
+            except KissError:
+                pass
+            last_err: Optional[Exception] = None
+            tuned = False
+            for attempt in range(1, 6):
+                try:
+                    if self.client.set_radio(freq_hz, self.cfg.bandwidth_hz,
+                                             self.cfg.sf, self.cfg.cr):
+                        self._tuned_hz = freq_hz
+                        tuned = True
+                        break
+                except KissError as e:
+                    last_err = e
+                    log.warning("SetRadio attempt %d/5 at %s Hz: %s",
+                                attempt, freq_hz, e)
+                    time.sleep(0.15 * attempt)
+            if not tuned:
+                raise KissError(
+                    f"SetRadio rejected at {freq_hz} Hz after 5 tries: {last_err}")
+            time.sleep(self.cfg.link_settle_s)
 
     def _do_tx(self, cmd: dict) -> None:
         assert self.client is not None
@@ -198,7 +226,7 @@ class LinkWorker:
         self._publish_status("rx_done", seq=cmd.get("seq"), rx_ok=rx_ok, size=size)
 
     def _do_burst_tx(self, cmd: dict) -> None:
-        """Tune once, then fire exactly ``count`` packets of ``size`` bytes."""
+        """Tune once (SetRadio + settle), then fire exactly ``count`` packets."""
         assert self.client is not None
         size = int(cmd["size"])
         count = int(cmd["count"])
@@ -208,9 +236,18 @@ class LinkWorker:
         self._tune(int(cmd["freq_hz"]))
         t0 = time.monotonic()
         sent = 0
-        for _ in range(count):
+        # Protocol: only one Data frame in flight. Never send the next packet
+        # until TxDone — doing so returns Error/TxBusy (0xF1 0x07) and desyncs
+        # the modem. Timeout must cover CSMA slot waits, not just airtime.
+        tx_timeout = max(3.0, float(self.cfg.link_tx_wait_s) + 2.0)
+        for i in range(count):
             self.client.transmit(payload)
-            self.client.wait_tx_done(timeout=self.cfg.link_tx_wait_s + 1.0)
+            try:
+                self.client.wait_tx_done(timeout=tx_timeout)
+            except KissError:
+                log.warning("burst_tx seq=%s pkt %d/%d: no TxDone — stopping burst",
+                            cmd.get("seq"), i + 1, count)
+                break
             sent += 1
         log.info("burst_tx seq=%s: %d/%d packets in %.2fs (size=%d)",
                  cmd.get("seq"), sent, count, time.monotonic() - t0, size)
@@ -220,7 +257,11 @@ class LinkWorker:
                              span_s=round(time.monotonic() - t0, 3))
 
     def _do_burst_rx(self, cmd: dict) -> None:
-        """Tune once, then capture up to ``count`` packets of ``size`` within ``window_s``."""
+        """Tune, signal ready, then capture up to ``count`` packets within ``window_s``.
+
+        The window starts *after* burst_rx_ready so the coordinator can fire TX
+        only once this radio is actually listening.
+        """
         assert self.client is not None
         size = int(cmd["size"])
         count = int(cmd["count"])
@@ -228,29 +269,35 @@ class LinkWorker:
         seq = cmd.get("seq")
         self._tune(int(cmd["freq_hz"]))
         self.client.drain_events()
+        self._publish_status("burst_rx_ready", seq=seq, size=size, expected=count)
         end = time.monotonic() + window
         received = 0
+        packets: list = []
         while received < count:
             remaining = end - time.monotonic()
             if remaining <= 0:
                 break
-            pkt = self.client.wait_rx_packet(timeout=min(remaining, 0.25),
-                                             expect_len=size)
+            pkt = self.client.wait_rx_packet(timeout=remaining, expect_len=size)
             if pkt is None:
-                continue
+                break
             received += 1
-            meta = self.client.next_rx_meta(timeout=0.05)
-            snr = meta.snr if meta else None
-            rssi = meta.rssi if meta else None
+            meta = self.client.next_rx_meta(timeout=0.02)
+            packets.append({
+                "snr_db": meta.snr if meta else None,
+                "rssi_dbm": meta.rssi if meta else None,
+            })
+        # Publish results *after* the radio window so MQTT RTT cannot steal it.
+        for i, p in enumerate(packets):
             self._publish_result(
-                freq_hz=int(cmd["freq_hz"]), size=size, trial=0,
-                seq=seq, rx_ok=True, snr_db=snr, rssi_dbm=rssi,
+                freq_hz=int(cmd["freq_hz"]), size=size, trial=i + 1,
+                seq=seq, rx_ok=True, snr_db=p["snr_db"], rssi_dbm=p["rssi_dbm"],
                 tx_ok=None)
         log.info("burst_rx seq=%s: %d/%d captured in %.2fs window",
                  seq, received, count, window)
         self._publish_status("burst_rx_done", seq=seq, size=size,
                              count=received, expected=count,
-                             window_s=round(window, 2))
+                             window_s=round(window, 2),
+                             packets=packets)
 
     # ----------------------------------------------------------------- publishing
     def _publish_result(self, **kw) -> None:
@@ -270,7 +317,7 @@ class LinkWorker:
         assert self.mqttc is not None
         self.mqttc.publish(status_topic(self.cfg.node_id),
                            _json({"ts": now_ts(), "node": self.cfg.node_id,
-                                  "state": state, **extra}), qos=1, retain=True)
+                                  "state": state, **extra}), qos=1, retain=False)
 
     def run_forever(self) -> int:
         while not _STOP["flag"]:

@@ -53,6 +53,10 @@ TFESC = 0xDD
 
 # Host->TNC command type bytes.
 CMD_DATA = 0x00
+CMD_TXDELAY = 0x01
+CMD_PERSISTENCE = 0x02
+CMD_SLOTTIME = 0x03
+CMD_FULLDUPLEX = 0x05
 CMD_SETHARDWARE = 0x06
 
 # SetHardware sub-commands.
@@ -392,6 +396,14 @@ class KissClient:
         if not (1 <= len(payload) <= MAX_PACKET_SIZE):
             raise ValueError(f"payload must be 1..{MAX_PACKET_SIZE} bytes, got {len(payload)}")
         self._write_frame(CMD_DATA, payload)
+
+    def set_txdelay(self, units_10ms: int) -> None:
+        """KISS TXDELAY in 10 ms units (firmware default 50 = 500 ms)."""
+        self._write_frame(CMD_TXDELAY, bytes([max(0, int(units_10ms)) & 0xFF]))
+
+    def set_fullduplex(self, enabled: bool) -> None:
+        """KISS full-duplex: nonzero bypasses CSMA (packets TX after TXDELAY)."""
+        self._write_frame(CMD_FULLDUPLEX, bytes([1 if enabled else 0]))
 
     def wait_tx_done(self, timeout: Optional[float] = None) -> bool:
         """Block until the next TxDone event. Returns True if transmission succeeded."""

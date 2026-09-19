@@ -72,11 +72,11 @@ class SweepConfig:
         default_factory=lambda: [1, 128, 255]
     )
     link_trials: int = 1           # unused by the burst sequencer (kept for CLI compat)
-    link_burst_count: int = 10     # packets per (channel, size, direction); known denominator
-    link_settle_s: float = 0.3     # AGC settle after a frequency change (both nodes)
-    link_rx_lead_s: float = 0.3    # coordinator waits this long before the TX burst
-    link_rx_window_s: float = 2.2  # rx capture window covering the whole TX burst
-    link_tx_wait_s: float = 0.5    # wait for TxDone between burst packets
+    link_burst_count: int = 20     # packets per (channel, size, direction); known denominator
+    link_settle_s: float = 0.8     # settle after SetRadio only (not every burst)
+    link_rx_lead_s: float = 0.0    # unused; coordinator waits for burst_rx_ready
+    link_rx_window_s: float = 4.0  # MQTT RTT + TX settle + 20-packet burst
+    link_tx_wait_s: float = 0.5    # TxDone wait floor (burst uses max(3s, this+2))
     # topology / identity
     node_id: str = "alpha"
     mqtt_host: str = "localhost"
