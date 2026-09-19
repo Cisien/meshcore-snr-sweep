@@ -54,12 +54,8 @@ def test_bandwidth_hz_property():
 
 def test_packet_sizes_in_range():
     cfg = C.SweepConfig()
+    assert cfg.packet_sizes == [1, 128, 255]
     assert all(1 <= s <= 255 for s in cfg.packet_sizes)
-    assert cfg.packet_sizes[0] == 1
-    assert cfg.packet_sizes[-1] == 255
-    # ~50-byte steps: differences should be ~50 (last step smaller).
-    diffs = [b - a for a, b in zip(cfg.packet_sizes, cfg.packet_sizes[1:])]
-    assert all(40 <= d <= 60 for d in diffs[:-1])
 
 
 def test_validate_rejects_bad_bw():

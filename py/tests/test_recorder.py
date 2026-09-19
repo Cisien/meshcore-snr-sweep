@@ -82,3 +82,73 @@ def test_summary_queries(tmp_path):
     assert len(rows) == 2
     assert rows[0]["fmin"] == -112  # 902.0 is cleanest
     s.close()
+
+
+def test_main_smoke_without_network(tmp_path, monkeypatch):
+    """Exercise main()'s CLI orchestration with every external component faked.
+
+    Replaces R.Recorder with a finite fake that prevents the production
+    recorder's side effects: no MQTT client, HTTP socket, background loop,
+    SQLite Store, or DB file. Asserts the captured constructor values and
+    the exact startup/shutdown lifecycle.
+    """
+    events = []
+    db_path = tmp_path / "smoke.sqlite3"
+    assert not db_path.exists()
+
+    class FakeRecorder:
+        def __init__(self, host, port, db, client_id="snr-recorder",
+                     username=None, password=None, use_tls=False):
+            events.append(
+                ("init", host, port, db, client_id, username, password, use_tls))
+
+        def start_mqtt(self):
+            events.append(("start_mqtt",))
+
+        def start_http(self, bind):
+            events.append(("start_http", bind))
+
+        def serve_forever(self):
+            events.append(("serve_forever",))
+            # return immediately so the test never blocks
+
+        def stop(self):
+            events.append(("stop",))
+
+    monkeypatch.setattr(R, "Recorder", FakeRecorder)
+
+    host = "mqtt.invalid"
+    port = 1883
+    client_id = "snr-sweep-smoke"
+    username = "user-test"
+    password = "pass-test"
+    bind = "127.0.0.1:0"
+
+    argv = [
+        "--host", host,
+        "--port", str(port),
+        "--db", str(db_path),
+        "--bind", bind,
+        "--client-id", client_id,
+        "--username", username,
+        "--password", password,
+        "--tls",
+    ]
+
+    rc = R.main(argv)
+
+    assert rc == 0
+
+    # constructor captured exactly the parsed values
+    assert ("init", host, port, str(db_path), client_id, username,
+            password, True) in events
+
+    # exact lifecycle order: construct, start_mqtt, start_http, serve_forever, stop
+    assert [e[0] for e in events] == [
+        "init", "start_mqtt", "start_http", "serve_forever", "stop"]
+
+    # start_http received the supplied bind
+    assert ("start_http", bind) in events
+
+    # no persistent storage side effect leaked through the fake
+    assert not db_path.exists()

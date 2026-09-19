@@ -42,11 +42,14 @@ channel_duration_s = 10     # seconds to sample each channel (~15 s/channel incl
 settle_s = 5                # AGC settle after a frequency change, before sampling
 
 # ---- link test (secondary objective) ----------------------------------------
-# ~1..255 bytes in ~50-byte steps (last step is smaller to land on 255).
-packet_sizes = [1, 51, 101, 151, 201, 255]
-link_trials = 3
-link_settle_s = 5
-link_tx_wait_s = 2
+# 1 / 128 / 255 byte packets. Each (channel, size, direction) is one burst of
+# `link_burst_count` packets (known delivery-rate denominator).
+packet_sizes = [1, 128, 255]
+link_burst_count = 10
+link_settle_s = 0.3
+link_rx_lead_s = 0.3
+link_rx_window_s = 2.2
+link_tx_wait_s = 0.5
 
 # ---- topology / identity ----------------------------------------------------
 # Node identity on the Pi running the sweep. Use a different value per site

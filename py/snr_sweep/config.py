@@ -69,13 +69,14 @@ class SweepConfig:
 
     # link test
     packet_sizes: List[int] = field(
-        default_factory=lambda: [1, 51, 101, 151, 201, 255]
-    )  # ~1..255 in ~50-byte steps
-    link_trials: int = 3
-    link_settle_s: float = 2.0     # AGC settle after a frequency change (both nodes)
-    link_rx_lead_s: float = 3.0    # coordinator waits this long before the TX fires
-    link_rx_window_s: float = 6.0  # rx capture window (covers lead + tx airtime)
-    link_tx_wait_s: int = 1        # wait for TxDone between transmissions
+        default_factory=lambda: [1, 128, 255]
+    )
+    link_trials: int = 1           # unused by the burst sequencer (kept for CLI compat)
+    link_burst_count: int = 10     # packets per (channel, size, direction); known denominator
+    link_settle_s: float = 0.3     # AGC settle after a frequency change (both nodes)
+    link_rx_lead_s: float = 0.3    # coordinator waits this long before the TX burst
+    link_rx_window_s: float = 2.2  # rx capture window covering the whole TX burst
+    link_tx_wait_s: float = 0.5    # wait for TxDone between burst packets
     # topology / identity
     node_id: str = "alpha"
     mqtt_host: str = "localhost"
@@ -120,8 +121,8 @@ def load_config(path: Optional[str | Path] = None, overrides: Optional[dict] = N
     for key in (
         "band_start_mhz", "band_end_mhz", "step_khz", "bandwidth_khz",
         "sf", "cr", "tx_power_dbm", "sample_count", "channel_duration_s",
-        "settle_s", "link_trials", "link_settle_s", "link_rx_lead_s",
-        "link_rx_window_s", "link_tx_wait_s",
+        "settle_s", "link_trials", "link_burst_count", "link_settle_s",
+        "link_rx_lead_s", "link_rx_window_s", "link_tx_wait_s",
         "baseline_enabled", "baseline_freq_mhz", "baseline_bandwidth_hz",
         "baseline_sf", "baseline_cr",
         "node_id", "mqtt_host", "mqtt_port", "mqtt_user", "mqtt_pass",

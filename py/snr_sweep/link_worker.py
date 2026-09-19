@@ -38,7 +38,7 @@ import paho.mqtt.client as mqtt
 from . import __version__
 from .config import SweepConfig, load_config
 from .kiss_client import KissClient, KissError
-from .linkproto import CMD_RX, CMD_TX, default_directions
+from .linkproto import CMD_RX, CMD_TX, CMD_BURST_RX, CMD_BURST_TX, default_directions
 from .mqtt import link_result_topic, make_client, status_topic, subscribe_for_node
 from .serial_port import find_port
 
@@ -146,6 +146,10 @@ class LinkWorker:
                     self._do_tx(cmd)
                 elif cmd["cmd"] == CMD_RX:
                     self._do_rx(cmd)
+                elif cmd["cmd"] == CMD_BURST_TX:
+                    self._do_burst_tx(cmd)
+                elif cmd["cmd"] == CMD_BURST_RX:
+                    self._do_burst_rx(cmd)
             except KissError as e:
                 log.warning("command %s failed: %s", cmd.get("cmd"), e)
                 self._publish_status("error", error=str(e))
@@ -192,6 +196,61 @@ class LinkWorker:
             seq=cmd.get("seq"), rx_ok=rx_ok, snr_db=snr, rssi_dbm=rssi,
             tx_ok=None)
         self._publish_status("rx_done", seq=cmd.get("seq"), rx_ok=rx_ok, size=size)
+
+    def _do_burst_tx(self, cmd: dict) -> None:
+        """Tune once, then fire exactly ``count`` packets of ``size`` bytes."""
+        assert self.client is not None
+        size = int(cmd["size"])
+        count = int(cmd["count"])
+        payload = bytes(range(1, size + 1))
+        if not (1 <= size <= 255):
+            raise ValueError(f"bad size {size}")
+        self._tune(int(cmd["freq_hz"]))
+        t0 = time.monotonic()
+        sent = 0
+        for _ in range(count):
+            self.client.transmit(payload)
+            self.client.wait_tx_done(timeout=self.cfg.link_tx_wait_s + 1.0)
+            sent += 1
+        log.info("burst_tx seq=%s: %d/%d packets in %.2fs (size=%d)",
+                 cmd.get("seq"), sent, count, time.monotonic() - t0, size)
+        self._publish_status("burst_tx_done", seq=cmd.get("seq"), ok=True,
+                             size=size, sent=sent,
+                             freq_hz=cmd["freq_hz"],
+                             span_s=round(time.monotonic() - t0, 3))
+
+    def _do_burst_rx(self, cmd: dict) -> None:
+        """Tune once, then capture up to ``count`` packets of ``size`` within ``window_s``."""
+        assert self.client is not None
+        size = int(cmd["size"])
+        count = int(cmd["count"])
+        window = float(cmd["window_s"])
+        seq = cmd.get("seq")
+        self._tune(int(cmd["freq_hz"]))
+        self.client.drain_events()
+        end = time.monotonic() + window
+        received = 0
+        while received < count:
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                break
+            pkt = self.client.wait_rx_packet(timeout=min(remaining, 0.25),
+                                             expect_len=size)
+            if pkt is None:
+                continue
+            received += 1
+            meta = self.client.next_rx_meta(timeout=0.05)
+            snr = meta.snr if meta else None
+            rssi = meta.rssi if meta else None
+            self._publish_result(
+                freq_hz=int(cmd["freq_hz"]), size=size, trial=0,
+                seq=seq, rx_ok=True, snr_db=snr, rssi_dbm=rssi,
+                tx_ok=None)
+        log.info("burst_rx seq=%s: %d/%d captured in %.2fs window",
+                 seq, received, count, window)
+        self._publish_status("burst_rx_done", seq=seq, size=size,
+                             count=received, expected=count,
+                             window_s=round(window, 2))
 
     # ----------------------------------------------------------------- publishing
     def _publish_result(self, **kw) -> None:

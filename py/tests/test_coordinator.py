@@ -45,21 +45,33 @@ def test_stale_results_are_not_matched():
 
 
 def test_full_run_synthesizes_missing_results():
-    """run() records a failed LinkResult when a seq gets no response."""
+    """run() pads a failed LinkResult per missing burst packet."""
     c = _coordinator()
-    c.cfg.link_rx_lead_s = 0.0  # don't actually sleep in the test
-    # Stub out the MQTT send/wait so no broker is needed.
+    c.cfg.link_rx_lead_s = 0.0
+    c.cfg.link_burst_count = 3
     c._send = lambda topic, obj: None
-    c._wait_result = lambda expected_seq, node_rx, timeout: None  # simulate total loss
-    # Patch flush to a no-op so we don't write files.
+    c._wait_status = lambda *a, **k: None
     c._flush = lambda: None
-    rc = c.run(freq_only=902.3, sizes=[51], trials=1)
+    rc = c.run(freq_only=902.3, sizes=[51], burst_count=3, window_s=0.0)
     assert rc == 0
-    # 1 channel * 1 size * 1 trial * 2 directions = 2 results
-    assert len(c.results) == 2
+    # 1 channel * 1 size * 2 directions * 3 packets = 6 results
+    assert len(c.results) == 6
     assert all(r.rx_ok is False for r in c.results)
     assert c.results[0].direction in ("alpha->beta", "beta->alpha")
     assert c.results[0].freq_mhz == 902.3
+
+
+def test_collect_burst_pads_to_known_count():
+    c = _coordinator()
+    c._wait_status = lambda *a, **k: {"state": "burst_rx_done", "count": 1}
+    c._record_result({"node": "beta", "freq_hz": 902300000, "packet_size": 128,
+                      "trial": 0, "rx_ok": True, "snr_db": 9.0, "rssi_dbm": -90.0,
+                      "seq": 7})
+    got = c._collect_burst(7, "beta", 3, 902300000, 128, timeout=0.2)
+    assert len(got) == 3
+    assert got[0].rx_ok is True
+    assert got[1].rx_ok is False
+    assert got[2].rx_ok is False
 
 
 def test_summary_groups_by_frequency():

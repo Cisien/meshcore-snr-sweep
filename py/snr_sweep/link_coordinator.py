@@ -1,30 +1,24 @@
 """Secondary objective: link-test COORDINATOR.
 
-A pure-MQTT sequencer (no radio). It drives the whole (frequency, size, trial,
-direction) matrix for two G3 nodes and aggregates the ``link/result`` reports
-it hears back. Run it on either Pi, or on the cluster, anywhere it can reach
-the broker and both workers.
+A pure-MQTT sequencer (no radio). It drives the (frequency, size, direction)
+matrix for two G3 nodes. Each cell is a **burst**: the receiver opens one
+capture window, the transmitter fires a fixed number of packets back-to-back,
+and delivery rate is captured/sent (sent is always ``link_burst_count``).
 
-Sequence per (freq, size, trial, direction)::
+Sequence per (freq, size, direction)::
 
-    1. send ``rx`` to the receiving worker (tune + open a capture window)
-    2. send ``tx`` to the transmitting worker (transmit one packet)
-    3. await the receiver's ``link/result`` for this seq
-    4. record the result
+    1. send ``burst_rx`` to the receiving worker (tune + open a capture window)
+    2. wait ``link_rx_lead_s`` so the window is open
+    3. send ``burst_tx`` to the transmitting worker (N packets, one tune)
+    4. await ``burst_rx_done`` and collect the N (padded) results
 
-The coordinator is the only thing that knows the full test plan; workers are
-dumb executors. Results are written to a local CSV/JSON and a final
-per-frequency summary table is printed.
+Workers are dumb executors. Results are written to a local CSV/JSON.
 
 Usage::
 
-    python -m snr_sweep.link_coordinator --config config/sweep.toml
-    python -m snr_sweep.link_coordinator --node-a tower --node-b field \
-        --freq-only 902.25 --sizes 1,255 --trials 1
-
-The node names are arbitrary role labels (e.g. the radio on the tower and the
-radio out in the field); they only have to match the ``--node`` each
-:mod:`snr_sweep.link_worker` was started with.
+    python -m snr_sweep.link_coordinator --config config/public.toml
+    python -m snr_sweep.link_coordinator --node-a tower --node-b field \\
+        --freq-only 902.3 --sizes 1,128,255 --burst-count 10
 """
 
 from __future__ import annotations
@@ -44,7 +38,9 @@ import paho.mqtt.client as mqtt
 
 from . import __version__
 from .config import SweepConfig, channels, load_config, fmt_duration
-from .linkproto import (CMD_RX, CMD_TX, default_directions, direction_label,
+from .linkproto import (CMD_RX, CMD_TX, CMD_BURST_RX, CMD_BURST_TX,
+                        default_directions, direction_label,
+                        burst_rx_command, burst_tx_command,
                         rx_command, tx_command)
 from .mqtt import (link_result_topic, link_report_topic, make_client, status_topic,
                    TOPIC_PREFIX)
@@ -84,6 +80,7 @@ class Coordinator:
         self._seq = 0
         self._client: Optional[mqtt.Client] = None
         self._result_box: List[LinkResult] = []
+        self._status_box: List[dict] = []
         self._cond = threading.Condition()
 
     # ----------------------------------------------------------------- mqtt
@@ -124,6 +121,12 @@ class Coordinator:
             return
         if topic.endswith("/link/result"):
             self._record_result(obj)
+        elif topic.endswith("/status"):
+            state = obj.get("state")
+            if state in ("burst_rx_done", "burst_tx_done"):
+                with self._cond:
+                    self._status_box.append(obj)
+                    self._cond.notify_all()
 
     def _record_result(self, obj: dict) -> None:
         try:
@@ -162,10 +165,54 @@ class Coordinator:
                     return None
                 self._cond.wait(timeout=min(remaining, 1.0))
 
+    def _wait_status(self, expected_seq: int, node: str, state: str,
+                     timeout: float) -> Optional[dict]:
+        end = time.monotonic() + timeout
+        with self._cond:
+            while True:
+                for i, s in enumerate(self._status_box):
+                    if s.get("seq") == expected_seq and s.get("node") == node \
+                            and s.get("state") == state:
+                        del self._status_box[i]
+                        return s
+                remaining = end - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self._cond.wait(timeout=min(remaining, 0.2))
+
+    def _drain_results(self, expected_seq: int, node_rx: str) -> List[LinkResult]:
+        captured: List[LinkResult] = []
+        with self._cond:
+            keep: List[LinkResult] = []
+            for r in self._result_box:
+                if r.seq == expected_seq and r.node_rx == node_rx:
+                    captured.append(r)
+                else:
+                    keep.append(r)
+            self._result_box = keep
+        return captured
+
+    def _collect_burst(self, seq: int, rx_node: str, count: int,
+                       freq_hz: int, size: int, timeout: float) -> List[LinkResult]:
+        """Wait for burst_rx_done, drain captured packets, pad misses to ``count``."""
+        self._wait_status(seq, rx_node, "burst_rx_done", timeout)
+        captured = self._drain_results(seq, rx_node)
+        out = captured[:count]
+        while len(out) < count:
+            out.append(LinkResult(
+                node_rx=rx_node, rx_ok=False, seq=seq,
+                freq_hz=freq_hz, packet_size=size,
+                trial=len(out) + 1, ts=now_ts()))
+        for i, r in enumerate(out, start=1):
+            r.trial = i
+        return out
+
     # ----------------------------------------------------------------- run
     def run(self, freq_only: Optional[float] = None, sizes: Optional[List[int]] = None,
-            trials: int = 1, window_s: float = 5.0) -> int:
+            trials: int = 1, window_s: float = 5.0,
+            burst_count: Optional[int] = None) -> int:
         sizes = sizes or self.cfg.packet_sizes
+        count = burst_count or self.cfg.link_burst_count
         chs = channels(self.cfg)
         if freq_only is not None:
             chs = [c for c in chs if abs(c.center_mhz - freq_only) < 0.001]
@@ -173,47 +220,41 @@ class Coordinator:
                 log.error("no channel near %.2f MHz", freq_only)
                 return 2
 
-        total = len(chs) * len(sizes) * trials * len(self.directions)
-        per_trial = self.cfg.link_rx_lead_s + window_s + 1.0
-        log.info("link test: %d channels x %d sizes x %d trials x %d directions = %d trials",
-                 len(chs), len(sizes), trials, len(self.directions), total)
-        log.info("estimated wall time ~ %s (at ~%.1f s/trial)", fmt_duration(total * per_trial), per_trial)
+        n_bursts = len(chs) * len(sizes) * len(self.directions)
+        n_pkts = n_bursts * count
+        per_burst = self.cfg.link_rx_lead_s + window_s
+        log.info("link test: %d channels x %d sizes x %d directions x %d pkt/burst = %d packets",
+                 len(chs), len(sizes), len(self.directions), count, n_pkts)
+        log.info("estimated wall time ~ %s (at ~%.1f s/burst, %d bursts)",
+                 fmt_duration(n_bursts * per_burst), per_burst, n_bursts)
 
         for ch in chs:
             for size in sizes:
-                for t in range(1, trials + 1):
-                    for (tx_node, rx_node) in self.directions:
-                        seq = self._next_seq()
-                        direction = direction_label(tx_node, rx_node)
-                        log.info("ch=%03d size=%3d trial=%d dir=%s seq=%d",
-                                 ch.index, size, t, direction, seq)
-                        # 1. receiver tunes + opens its capture window
-                        self._send(
-                            f"{TOPIC_PREFIX}/coordinator/{rx_node}/cmd",
-                            rx_command(freq_hz=ch.center_hz, size=size, trial=t, seq=seq,
-                                      window_s=window_s))
-                        # Wait long enough for the receiver to settle (link_settle_s)
-                        # and open its window before the transmitter keys up.
-                        time.sleep(self.cfg.link_rx_lead_s)
-                        # 2. transmitter sends one packet
-                        self._send(
-                            f"{TOPIC_PREFIX}/coordinator/{tx_node}/cmd",
-                            tx_command(freq_hz=ch.center_hz, size=size, trial=t, seq=seq))
-                        # 3. await the receiver's result, then fill in context
-                        r = self._wait_result(seq, rx_node, timeout=window_s + 4.0)
-                        if r is None:
-                            log.warning("  no result for seq %d (size=%d)", seq, size)
-                            r = LinkResult(node_rx=rx_node, rx_ok=False, seq=seq,
-                                           freq_hz=ch.center_hz, packet_size=size,
-                                           trial=t, ts=now_ts())
+                for (tx_node, rx_node) in self.directions:
+                    seq = self._next_seq()
+                    direction = direction_label(tx_node, rx_node)
+                    log.info("ch=%03d size=%3d dir=%s seq=%d burst=%d",
+                             ch.index, size, direction, seq, count)
+                    self._send(
+                        f"{TOPIC_PREFIX}/coordinator/{rx_node}/cmd",
+                        burst_rx_command(freq_hz=ch.center_hz, size=size,
+                                         count=count, window_s=window_s, seq=seq))
+                    time.sleep(self.cfg.link_rx_lead_s)
+                    self._send(
+                        f"{TOPIC_PREFIX}/coordinator/{tx_node}/cmd",
+                        burst_tx_command(freq_hz=ch.center_hz, size=size,
+                                         count=count, seq=seq))
+                    got = self._collect_burst(
+                        seq, rx_node, count, ch.center_hz, size,
+                        timeout=window_s + 4.0)
+                    ok = sum(1 for r in got if r.rx_ok)
+                    for r in got:
                         r.freq_mhz = ch.center_mhz
                         r.freq_hz = ch.center_hz
                         r.channel_index = ch.index
                         r.direction = direction
-                        self.results.append(r)
-                        if r.rx_ok:
-                            log.info("  rx_ok=%s snr=%s rssi=%s",
-                                     r.rx_ok, r.snr_db, r.rssi_dbm)
+                    self.results.extend(got)
+                    log.info("  %d/%d delivered", ok, count)
         self._flush()
         return 0 if self.results else 1
 
@@ -253,8 +294,11 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--node-a", default="tower", help="first node id (default: tower)")
     ap.add_argument("--node-b", default="field", help="second node id (default: field)")
     ap.add_argument("--freq-only", type=float)
-    ap.add_argument("--sizes", help="comma list of packet sizes")
-    ap.add_argument("--trials", type=int, default=None)
+    ap.add_argument("--sizes", help="comma list of packet sizes (default: 1,128,255)")
+    ap.add_argument("--burst-count", type=int, default=None,
+                    help="packets per (channel, size, direction); known delivery denominator")
+    ap.add_argument("--trials", type=int, default=None,
+                    help="alias for --burst-count (kept for CLI compat)")
     ap.add_argument("--window", type=float, default=None,
                     help="rx capture window seconds (default: link_rx_window_s from config)")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -262,19 +306,20 @@ def main(argv: Optional[list] = None) -> int:
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")
-    cfg = load_config(args.config, {"trials": args.trials})
+    cfg = load_config(args.config)
     node_a = args.node_a
     node_b = args.node_b
     sizes = None
     if args.sizes:
         sizes = [int(x) for x in args.sizes.split(",")]
     window_s = args.window if args.window is not None else cfg.link_rx_window_s
+    burst_count = args.burst_count or args.trials or cfg.link_burst_count
 
     coord = Coordinator(cfg, node_a, node_b)
     coord.connect()
     try:
         return coord.run(freq_only=args.freq_only, sizes=sizes,
-                         trials=args.trials or cfg.link_trials, window_s=window_s)
+                         burst_count=burst_count, window_s=window_s)
     finally:
         if coord._client:
             coord._client.loop_stop()

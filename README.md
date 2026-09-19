@@ -110,6 +110,24 @@ Run the test suite (no hardware, no broker needed):
 python -m pytest py/tests -q
 ```
 
+### Recorder dry-run smoke test
+
+The test `py/tests/test_recorder.py::test_main_smoke_without_network` runs the
+recorder CLI entry point `snr_sweep.recorder.main` in-process, with the
+`Recorder` class replaced by a recording fake. It makes no MQTT connection,
+opens no HTTP server or socket, starts no thread, and creates no SQLite file.
+
+It verifies that `main` reads the explicit CLI flags, passes the parsed values
+to the `Recorder` constructor, and runs the lifecycle in order — `start_mqtt`,
+`start_http` (with the supplied bind address), `serve_forever`, `stop` — and
+returns `0`. It also verifies the temporary DB path does not exist afterward.
+
+Run only this test:
+
+```bash
+.venv/bin/python -m pytest py/tests/test_recorder.py::test_main_smoke_without_network -q
+```
+
 ### Choosing the right serial path
 
 The G3 enumerates as `/dev/ttyACM*`, and the number **shifts every time the
