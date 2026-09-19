@@ -68,6 +68,44 @@ def test_render_html_is_selfcontained(tmp_path):
     assert "animation: false" in text
 
 
+def test_good_bands_and_mhz_grid():
+    chans = C.aggregate(_rows())
+    # ch0 all 100%, ch1 255B is 50% so not a >=80% all-size band
+    bands = C.good_bands(chans, threshold=80.0)
+    assert len(bands) == 1
+    assert bands[0]["start_mhz"] == 902.3
+    assert bands[0]["end_mhz"] == 902.3
+    labels = [c.freq_mhz for c in chans]
+    assert C.mhz_grid_indices([902.3, 903.0, 903.1, 904.0]) == [1, 3]
+    html = C.render_html(labels, C.build_series(chans)[1], "T", "S",
+                         bands=bands, mhz_idx=[0])
+    assert "≥80%" in html
+    assert "mhzIdx" in html
+
+
+def test_assign_label_rows_staggers_nearby_bands():
+    bands = [
+        {"start_i": 44, "end_i": 44, "label": "906.7"},
+        {"start_i": 46, "end_i": 46, "label": "906.9"},
+        {"start_i": 54, "end_i": 54, "label": "907.7"},
+    ]
+    placed = C.assign_label_rows(bands, min_sep=10)
+    assert [b["row"] for b in placed] == [0, 1, 0]
+    html = C.render_html([902.3], [], "T", "S", bands=placed)
+    assert "b.row" in html
+    assert "measureText" in html
+
+
+def test_snr_axis_includes_negatives():
+    lo, hi = C.snr_axis_range([
+        {"yAxisID": "y1", "data": [-8.75, -5.0, 2.0]},
+        {"yAxisID": "y", "data": [90, 80, 70]},
+    ])
+    assert lo <= -8.75
+    assert hi >= 2.0
+    assert lo < 0
+
+
 def test_load_and_newest(tmp_path):
     a = tmp_path / "link_test-a-b-1.json"
     b = tmp_path / "link_test-a-b-2.json"
@@ -75,3 +113,11 @@ def test_load_and_newest(tmp_path):
     b.write_text(json.dumps(_rows()))
     assert C.newest_link_artifact(tmp_path) == b
     assert len(C.load_artifact(b)) == 12
+
+
+def test_filter_direction():
+    rows = C.filter_direction(_rows(), "tower->field")
+    assert len(rows) == 6
+    assert all(r["direction"] == "tower->field" for r in rows)
+    chans = C.aggregate(rows)
+    assert chans[0].sizes[1] == {"ok": 1, "total": 1}
